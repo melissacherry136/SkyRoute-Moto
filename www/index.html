@@ -620,7 +620,7 @@ async function buildRoute(isReroute) {
     if (!Object.keys(S.routes).length) { const rt = await routeOSRM(S.pos, S.dest.lngLat); if (reqId !== buildRoute.seq) return; S.routes = { fast: rt }; toast('Scenic routing unavailable right now — showing direct', 3000); }
     if (!S.routes[S.mode]) S.mode = S.routes.balanced ? 'balanced' : Object.keys(S.routes)[0];
     applyRoute(S.routes[S.mode], false);
-  } catch (e) { console.warn(e); toast('Could not find a route'); }
+  } catch (e) { console.warn(e); const cached = store.get('lastRoute'); if (cached && cached.coords) { toast('Offline \u2014 showing last saved route', 3000); applyRoute({ coords: cached.coords, steps: cached.steps, duration: cached.duration, engine: 'cached', mode: cached.mode }, false); } else toast('Could not find a route'); }
 }
 buildRoute.seq = 0;
 function applyRoute(rt, isReroute) {
@@ -630,6 +630,7 @@ function applyRoute(rt, isReroute) {
   steps.forEach((st, k) => { const endIdx = k + 1 < steps.length ? steps[k + 1].startIdx : coords.length - 1; const d0 = cum[st.startIdx], span = Math.max(1, cum[endIdx] - d0); for (let i = st.startIdx + 1; i <= endIdx; i++) cumT[i] = t + (cum[i] - d0) / span * st.duration; t += st.duration; st.startDist = d0; st.announced = {}; });
   for (let i = 1; i < coords.length; i++) if (cumT[i] == null) cumT[i] = cumT[i - 1];
   S.route = { coords, cum, cumT, steps, distance: cum[cum.length - 1], duration: rt.duration, progress: 0, remainingDist: cum[cum.length - 1], remainingTime: rt.duration, engine: rt.engine, mode: rt.mode };
+  try { store.set('lastRoute', { coords, steps, distance: S.route.distance, duration: rt.duration, dest: S.dest, mode: rt.mode, ts: Date.now() }); } catch (e) {}
   map.getSource('route').setData({ type: 'Feature', geometry: { type: 'LineString', coordinates: coords } });
   const col = { scenic: ['#f97316', '#7c2d12'], balanced: ['#22c55e', '#14532d'], fast: ['#3b8bff', '#0c3c8c'] }[rt.mode] || ['#3b8bff', '#0c3c8c'];
   map.setPaintProperty('route-line', 'line-color', col[0]); map.setPaintProperty('route-casing', 'line-color', col[1]);
@@ -814,9 +815,9 @@ function setPosition(lng, lat, heading, speed, alt, manual) {
 }
 function startGeolocation() {
   const onFix = c => { if (DEMO && S.navigating) return; setPosition(c.longitude, c.latitude, c.heading, c.speed, c.altitude, false); };
-  if (CAP && CAP.Geolocation) { CAP.Geolocation.watchPosition({ enableHighAccuracy: true, timeout: 20000, maximumAge: 1000 }, (p, err) => { if (err) { console.warn(err); return; } onFix(p.coords); }); return; }
+  if (CAP && CAP.Geolocation) { let capWatch = null; const startCap = () => { capWatch = CAP.Geolocation.watchPosition({ enableHighAccuracy: true, timeout: 15000, maximumAge: 1000 }, (p, err) => { if (err) { console.warn(err); if (capWatch != null) { try { CAP.Geolocation.clearWatch({ id: capWatch }); } catch (e) {} capWatch = null; setTimeout(startCap, 3000); } return; } onFix(p.coords); }); }; startCap(); return; }
   if (!navigator.geolocation) { toast('No GPS available — tap the map to set your start'); return; }
-  navigator.geolocation.watchPosition(p => onFix(p.coords), err => toast(err.code === 1 ? 'Location permission denied — tap the map to set your start' : 'Waiting for GPS…', 4000), { enableHighAccuracy: true, maximumAge: 1000, timeout: 20000 });
+  navigator.geolocation.watchPosition(p => onFix(p.coords), err => toast(err.code === 1 ? 'Location permission denied — tap the map to set your start' : 'Waiting for GPS…', 4000), { enableHighAccuracy: true, maximumAge: 1000, timeout: 15000 });
 }
 $('#recenter').onclick = () => { S.follow = true; $('#recenter').classList.add('hidden'); if (S.pos) { if (S.navigating) navCamera(true); else map.easeTo({ center: S.pos, zoom: 15, bearing: 0, pitch: 0 }); } };
 
@@ -942,6 +943,8 @@ async function startNavigation() {
   $('#poipop').classList.add('hidden'); renderAhead();
   setSheet(true, true);
   try { if (CAP && CAP.KeepAwake) CAP.KeepAwake.keepAwake(); else S.wake = await navigator.wakeLock?.request('screen'); } catch (e) { }
+  if (S.keepAliveTimer) clearInterval(S.keepAliveTimer);
+  S.keepAliveTimer = setInterval(() => { if (!S.navigating) { clearInterval(S.keepAliveTimer); S.keepAliveTimer = null; return; } try { if (CAP && CAP.KeepAwake) CAP.KeepAwake.keepAwake(); } catch (e) {} }, 30000);
   startRide();
   speak('Starting route. ' + S.route.steps[0].verbal + (S.route.headline ? '. Weather: ' + S.route.headline.replace('·', ',') : ''));
   S.route.steps[0].announced.now = true;
@@ -951,6 +954,7 @@ async function startNavigation() {
 function endNavigation(clearRoute) {
   const wasNav = S.navigating; S.navigating = false; stopDemo();
   document.body.classList.remove('nav');
+  if (S.keepAliveTimer) { clearInterval(S.keepAliveTimer); S.keepAliveTimer = null; }
   try { if (CAP && CAP.KeepAwake) CAP.KeepAwake.allowSleep(); else S.wake?.release(); } catch (e) { }
   $('#toprow').classList.remove('hidden'); $('#banner').classList.add('hidden'); $('#inst').classList.add('hidden'); $('#ahead').classList.add('hidden');
   $('#ridesbtn').classList.remove('hidden'); $('#startbtn').classList.remove('hidden'); $('#endbtn').classList.add('hidden'); $('#barspeed').classList.add('hidden');
@@ -978,7 +982,7 @@ $('#clearbtn').onclick = () => endNavigation(true);
 function navCamera(force) {
   if (!S.follow && !force) return;
   const h = window.innerHeight, sheetH = sheet.offsetHeight || 0, topH = $('#top').offsetHeight || 0;
-  map.easeTo({ center: S.pos, bearing: S.heading, pitch: 55, zoom: S.speed > 25 ? 15.5 : 16.5, padding: { top: Math.max(topH, h * 0.4), bottom: sheetH, left: 0, right: 0 }, duration: 900, easing: t => t });
+  map.easeTo({ center: S.pos, bearing: S.heading, pitch: 45, zoom: S.speed > 25 ? 15.5 : 16.5, padding: { top: Math.max(topH, h * 0.4), bottom: sheetH, left: 0, right: 0 }, duration: 900, easing: t => t });
 }
 function navTick() {
   const r = S.route; if (!r || !S.pos) return;
@@ -999,6 +1003,7 @@ function navTick() {
   updateSheetStats(); if (r.wxPts) renderRouteWeather(); renderAhead(np.along); navCamera(false);
 }
 function speak(text) { if (!('speechSynthesis' in window) || text === S.lastVoice) return; S.lastVoice = text; const u = new SpeechSynthesisUtterance(text); u.rate = 1.05; u.lang = 'en-US'; speechSynthesis.cancel(); speechSynthesis.speak(u); }
+if ('speechSynthesis' in window) setInterval(() => { try { if (speechSynthesis.speaking) speechSynthesis.resume(); } catch (e) {} }, 10000);
 
 /* ---------- demo driver (?demo=1) ---------- */
 function startDemo() {
@@ -1024,7 +1029,7 @@ async function exportGPX(ride) {
   const samples = await DB.get(ride.id); if (!samples || !samples.length) { toast('No track stored for this ride'); return; }
   const text = gpx(ride, samples), fname = `SkyRoute-${new Date(ride.date).toISOString().slice(0, 10)}-${ride.to.replace(/[^\w]+/g, '_').slice(0, 30)}.gpx`;
   try {
-    if (CAP && CAP.Filesystem) { const w = await CAP.Filesystem.writeFile({ path: fname, data: text, directory: CAP.Directory.Cache, encoding: CAP.Encoding.UTF8 }); await CAP.Share.share({ title: fname, files: [w.uri] }); }
+    if (CAP && CAP.Filesystem) { const w = await CAP.Filesystem.writeFile({ path: fname, data: text, directory: (CAP.Directory && CAP.Directory.Cache) || 'CACHE', encoding: (CAP.Encoding && CAP.Encoding.UTF8) || 'utf8' }); await CAP.Share.share({ title: fname, files: [w.uri] }); }
     else { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([text], { type: 'application/gpx+xml' })); a.download = fname; a.click(); }
   } catch (e) { console.warn(e); toast('Could not export'); }
 }

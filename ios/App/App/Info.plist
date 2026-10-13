@@ -39,6 +39,8 @@
 	<string>SkyRoute uses your location to keep navigating and speaking turns while the screen is off or another app is open.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>SkyRoute uses your location to navigate and to show the weather along your route.</string>
+	<key>NSMotionUsageDescription</key>
+	<string>SkyRoute uses motion sensors to measure your bike's lean angle and braking.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
@@ -67,10 +69,6 @@
 	<string>LaunchScreen</string>
 	<key>UIMainStoryboardFile</key>
 	<string>Main</string>
-	<key>UIRequiredDeviceCapabilities</key>
-	<array>
-		<string>armv7</string>
-	</array>
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>
