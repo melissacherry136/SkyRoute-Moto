@@ -48,8 +48,8 @@
   #results em{position:absolute;right:16px;top:50%;transform:translateY(-50%);font-style:normal;font-weight:700;color:var(--accent);font-size:15px}
   .favrow{display:flex;border-bottom:1px solid var(--line)} .favrow button{border-bottom:0!important;padding-right:16px!important}
   .favrow .favdel{flex:0 0 60px;width:60px;text-align:center;font-size:28px;color:var(--muted)}
-  #favbtn.on{color:#fbbf24}
-  #favpick{display:flex;gap:10px;margin-top:10px} #favpick .btn{height:60px;font-size:18px}
+  #bar #favbtn{flex:0 0 56px;width:56px;padding:0;font-size:30px;line-height:1;color:var(--muted);background:var(--panel2)} #bar #favbtn.on{color:#fbbf24} body.nav #favbtn{display:none}
+  #favpick{display:flex;gap:10px;margin-top:10px} #favpick .btn{height:60px;font-size:18px} #favpick{margin:0 0 8px}
   #levelscreen{position:fixed;inset:0;z-index:30;background:var(--bg);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px;padding:calc(var(--sat) + 24px) 24px calc(var(--sab) + 24px);text-align:center}
   #levelscreen h2{font-size:28px;margin:0} #levelscreen p{color:var(--muted);font-size:19px;margin:0;max-width:420px}
   #levelscreen .phone{font-size:72px;line-height:1;animation:tilt 2.4s ease-in-out infinite}
@@ -230,9 +230,11 @@
     <div><div class="eta" id="eta">--</div><div class="sub"><span id="dur">--</span> · <span id="dist">--</span></div></div>
     <div class="sp"></div>
     <div id="barspeed" class="hidden">-- <small>mph</small></div>
+    <button class="btn fav" id="favbtn" title="Save this destination">☆</button>
     <button class="btn primary" id="startbtn">Start</button>
     <button class="btn danger hidden" id="endbtn">End</button>
   </div>
+  <div id="favpick" class="hidden"><button class="btn" id="favhome">🏠 Set as Home</button><button class="btn" id="favstar">★ Favorite</button><button class="btn ghost" id="favcancel">✕</button></div>
   <div id="more">
     <div class="modes"><button data-mode="scenic"><b>🏍 Scenic</b><small></small></button><button data-mode="balanced"><b>🛤 Scenic + direct</b><small></small></button><button data-mode="fast"><b>⚡ Direct</b><small></small></button></div>
     <div id="dest">--</div>
@@ -246,10 +248,8 @@
     <div class="actions" id="planactions">
       <button class="btn ghost" id="clearbtn">✕</button>
       <button class="btn ghost" id="sharebtn">Share</button>
-      <button class="btn ghost" id="favbtn" title="Save this destination">☆ Save</button>
       <button class="btn ghost" id="levelbtn" title="Level the phone for lean angle">⟲ Level</button>
     </div>
-    <div id="favpick" class="hidden"><button class="btn" id="favhome">🏠 Set as Home</button><button class="btn" id="favstar">★ Favorite</button><button class="btn ghost" id="favcancel">✕</button></div>
   </div>
 </div>
 
@@ -492,6 +492,7 @@ function stopRadar() { clearInterval(S.radarTimer); (S.radar?.frames || []).forE
 
 /* ---------- search ---------- */
 let qTimer, qAbort = null; const qCache = new Map();
+function searchOrigin() { if (S.pos) return S.pos; const last = store.get('lastPos'); if (last && last.length === 2) return last; try { const c = map.getCenter(); return [c.lng, c.lat]; } catch (e) { return null; } }
 function escapeHtml(t) { return String(t).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 $('#q').addEventListener('input', () => { const v = $('#q').value.trim(); $('#qclear').classList.toggle('hidden', !v); clearTimeout(qTimer); if (v.length < 3) { showFavorites(); return; } qTimer = setTimeout(() => searchPlaces(v), 350); });
 $('#q').addEventListener('focus', () => { const v = $('#q').value.trim(); if (v.length < 3 || (S.dest && v === S.dest.name)) { showFavorites(); if (v) $('#q').select(); } });
@@ -507,30 +508,48 @@ async function searchPlaces(q) {
   let items = qCache.get(q);
   if (!items) {
     const timeout = setTimeout(() => ctl.abort(), 9000);
-    const res = await Promise.allSettled([searchNominatim(q, ctl.signal), searchPhoton(q, ctl.signal), searchCensus(q, ctl.signal)]);
-    clearTimeout(timeout); if (ctl.signal.aborted && qAbort !== ctl) return;
-    const all = res.flatMap(r => r.status === 'fulfilled' ? r.value : []);
-    if (!all.length && res.every(r => r.status === 'rejected')) { box.innerHTML = '<button disabled><b>Search failed</b><span>Check your connection and try again</span></button>'; return; }
-    items = mergeResults(all); if (items.length) qCache.set(q, items);
+    const isAddress = /^\s*\d+\s+\S/.test(q);
+    const nearby = isAddress ? Promise.resolve([]) : searchNearby(q, ctl.signal).catch(() => []);
+    const res = await Promise.allSettled([isAddress ? searchNominatim(q, ctl.signal) : Promise.resolve([]), searchPhoton(q, ctl.signal), searchCensus(q, ctl.signal)]);
+    if (ctl.signal.aborted && qAbort !== ctl) { clearTimeout(timeout); return; }
+    const fast = res.flatMap(r => r.status === 'fulfilled' ? r.value : []);
+    items = mergeResults(fast); renderResults(items, true);
+    const extra = await nearby; clearTimeout(timeout); if (qAbort !== ctl) return;
+    if (extra.length) items = mergeResults(fast.concat(extra));
+    if (!items.length && res.every(r => r.status === 'rejected')) { box.innerHTML = '<button disabled><b>Search failed</b><span>Check your connection and try again</span></button>'; return; }
+    if (items.length) qCache.set(q, items);
   }
-  box.innerHTML = '';
-  if (!items.length) { box.innerHTML = '<button disabled><b>No results</b><span>Try adding the city, or check the spelling</span></button>'; return; }
+  renderResults(items, false);
+}
+function renderResults(items, partial) {
+  const box = $('#results'); box.innerHTML = '';
+  if (!items.length) { box.innerHTML = partial ? '<button disabled><b>Searching nearby…</b></button>' : '<button disabled><b>No results nearby</b><span>Try adding the city, or check the spelling</span></button>'; return; }
   for (const it of items) { const b = document.createElement('button'); b.innerHTML = `<b>${escapeHtml(it.name)}</b><span>${escapeHtml(it.sub)}</span>${it.dist != null ? `<em>${fmtMiles(it.dist)}</em>` : ''}`; b.onclick = () => pickResult(it); box.appendChild(b); }
 }
+async function searchNearby(q, signal) {   // businesses & chains within ~25 miles (Nominatim, bounded), tolerant of a missing apostrophe
+  const o = searchOrigin(); if (!o) return [];
+  const q2 = /['’]/.test(q) ? q : q.replace(/\b([A-Za-z]{2,})s\b/g, "$1's");   // "trader joes" → "trader joe's"
+  const d = 0.36; const box = `&bounded=1&viewbox=${(o[0] - d).toFixed(3)},${(o[1] + d).toFixed(3)},${(o[0] + d).toFixed(3)},${(o[1] - d).toFixed(3)}`;
+  const u = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(q2)}&format=jsonv2&limit=10&addressdetails=1&dedupe=1${box}`;
+  const r = await fetch(u, { signal, headers: { Accept: 'application/json', 'Accept-Language': 'en' } }); if (!r.ok) throw 0; const j = await r.json();
+  return j.map(it => { const a = it.address || {}; const addr = [a.house_number, a.road].filter(Boolean).join(' '); const name = it.name || it.display_name.split(',')[0]; const sub = [addr, a.city || a.town || a.village || a.hamlet || a.county, a.state].filter(Boolean).join(', '); return { name, sub, lngLat: [+it.lon, +it.lat], rank: 1 }; });
+}
 function mergeResults(all) {   // de-duplicate, rank by distance from the rider, keep it local
-  const out = [];
-  for (const it of all) { if (!it.lngLat || isNaN(it.lngLat[0])) continue; if (out.some(o => haversine(o.lngLat, it.lngLat) < 120)) continue; it.dist = S.pos ? haversine(S.pos, it.lngLat) : null; out.push(it); }
-  if (S.pos) { out.sort((a, b) => (a.rank - b.rank) || (a.dist - b.dist)); const near = out.filter(o => o.dist < 400 * MI); return (near.length ? near : out).slice(0, 7); }
+  const o = searchOrigin(); const out = [];
+  for (const it of all) { if (!it.lngLat || isNaN(it.lngLat[0])) continue; if (out.some(x => haversine(x.lngLat, it.lngLat) < 120)) continue; it.dist = o ? haversine(o, it.lngLat) : null; out.push(it); }
+  if (!o) return out.slice(0, 7);
+  out.sort((a, b) => (a.rank - b.rank) || (a.dist - b.dist));
+  for (const limit of [150, 400]) { const near = out.filter(x => x.dist < limit * MI); if (near.length) return near.slice(0, 7); }   // local first; widen only if nothing is close
   return out.slice(0, 7);
 }
-function withinBox() { if (!S.pos) return ''; const d = 1.2; return `&viewbox=${(S.pos[0] - d).toFixed(3)},${(S.pos[1] + d).toFixed(3)},${(S.pos[0] + d).toFixed(3)},${(S.pos[1] - d).toFixed(3)}`; }
+function withinBox() { const o = searchOrigin(); if (!o) return ''; const d = 1.2; return `&viewbox=${(o[0] - d).toFixed(3)},${(o[1] + d).toFixed(3)},${(o[0] + d).toFixed(3)},${(o[1] - d).toFixed(3)}`; }
 async function searchNominatim(q, signal) {   // best at full street addresses
   const u = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(q)}&format=jsonv2&limit=8&addressdetails=1&dedupe=1${withinBox()}`;
   const r = await fetch(u, { signal, headers: { Accept: 'application/json', 'Accept-Language': 'en' } }); if (!r.ok) throw 0; const j = await r.json();
   return j.map(it => { const a = it.address || {}; const addr = [a.house_number, a.road].filter(Boolean).join(' '); const name = (it.name && it.category !== 'place' && !/^(house|building|residential|yes)$/.test(it.type) ? it.name : '') || addr || it.display_name.split(',')[0]; const sub = [name !== addr ? addr : null, a.city || a.town || a.village || a.hamlet || a.county, a.state].filter(Boolean).join(', '); return { name, sub, lngLat: [+it.lon, +it.lat], rank: /\d/.test(q) && a.house_number ? 0 : 1 }; });
 }
 async function searchPhoton(q, signal) {   // best at place names (parks, towns, businesses)
-  let u = `https://photon.komoot.io/api/?q=${encodeURIComponent(q)}&limit=8&lang=en`; if (S.pos) u += `&lat=${S.pos[1]}&lon=${S.pos[0]}&location_bias_scale=0.6&zoom=11`;
+  let u = `https://photon.komoot.io/api/?q=${encodeURIComponent(q)}&limit=8&lang=en`; const o = searchOrigin(); if (o) u += `&lat=${o[1]}&lon=${o[0]}&location_bias_scale=0.8&zoom=11`;
   const r = await fetch(u, { signal }); if (!r.ok) throw 0; const j = await r.json();
   return j.features.map(f => { const p = f.properties; const addr = [p.housenumber, p.street].filter(Boolean).join(' '); const name = p.name || addr || p.city || p.county || ''; const sub = [name !== addr && addr ? addr : null, p.city || p.county, p.state].filter(Boolean).join(', '); return { name, sub, lngLat: f.geometry.coordinates, rank: 1 }; });
 }
@@ -559,7 +578,7 @@ function showFavorites() {
   }
   box.classList.remove('hidden');
 }
-function renderFavBtn() { const f = findFav(S.dest); const b = $('#favbtn'); b.textContent = f ? (f.home ? '🏠 Home' : '★ Saved') : '☆ Save'; b.classList.toggle('on', !!f); $('#favpick').classList.add('hidden'); }
+function renderFavBtn() { const f = findFav(S.dest); const b = $('#favbtn'); b.textContent = f ? (f.home ? '🏠' : '★') : '☆'; b.title = f ? 'Saved — tap to remove' : 'Save this destination'; b.classList.toggle('on', !!f); $('#favpick').classList.add('hidden'); }
 $('#favbtn').onclick = () => { if (!S.dest) return; if (findFav(S.dest)) { store.set('favs', favs().filter(o => favKey(o) !== favKey(S.dest))); toast('Removed from favorites'); renderFavBtn(); return; } $('#favpick').classList.toggle('hidden'); };
 function addFav(home) { if (!S.dest) return; let list = favs().filter(o => favKey(o) !== favKey(S.dest)); if (home) list = list.map(o => ({ ...o, home: false })); list.unshift({ name: S.dest.name, sub: S.dest.sub, lngLat: S.dest.lngLat, home: !!home }); store.set('favs', list.slice(0, 50)); toast(home ? '🏠 Home set' : '★ Saved to favorites'); renderFavBtn(); }
 $('#favhome').onclick = () => addFav(true); $('#favstar').onclick = () => addFav(false); $('#favcancel').onclick = () => $('#favpick').classList.add('hidden');
@@ -806,6 +825,7 @@ new ResizeObserver(() => document.documentElement.style.setProperty('--sheet-h',
 /* ---------- position ---------- */
 function setPosition(lng, lat, heading, speed, alt, manual) {
   const prev = S.pos; S.pos = [lng, lat]; S.speed = speed || 0; if (alt != null && !isNaN(alt)) S.alt = alt;
+  if (!prev || haversine(prev, S.pos) > 500) store.set('lastPos', [+lng.toFixed(4), +lat.toFixed(4)]);
   if (heading != null && !isNaN(heading) && (speed > 1 || manual)) S.heading = heading; else if (prev && haversine(prev, S.pos) > 5) S.heading = bearing(prev, S.pos);
   if (!S.hasFix) { S.hasFix = true; meMarker.setLngLat(S.pos).addTo(map); if (!S.route) map.jumpTo({ center: S.pos, zoom: 14 }); if (S.dest && !S.route) buildRoute(false); }
   meMarker.setLngLat(S.pos).setRotation(S.heading);
