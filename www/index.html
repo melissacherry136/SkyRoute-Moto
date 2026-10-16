@@ -52,6 +52,8 @@
   #favpick{display:flex;gap:10px;margin-top:10px} #favpick .btn{height:60px;font-size:18px} #favpick{margin:0 0 8px}
   #status{position:fixed;left:12px;right:12px;bottom:calc(var(--sab) + 16px);z-index:12;background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:16px;backdrop-filter:blur(12px);max-width:536px;margin:0 auto}
   #status .t{font-size:20px;font-weight:800} #status .d{color:var(--muted);font-size:15px;margin-top:4px} #status .a{display:flex;gap:10px;margin-top:12px} #status .a .btn{height:56px;font-size:18px}
+  #verchip{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(var(--sab) + 14px);z-index:9;background:var(--panel);border:1px solid var(--line);border-radius:999px;padding:6px 14px;font-size:13px;color:var(--muted);pointer-events:none}
+  .verline{text-align:center;color:var(--muted);font-size:13px;margin-top:18px;opacity:.8}
   #levelscreen{position:fixed;inset:0;z-index:30;background:var(--bg);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px;padding:calc(var(--sat) + 24px) 24px calc(var(--sab) + 24px);text-align:center}
   #levelscreen h2{font-size:28px;margin:0} #levelscreen p{color:var(--muted);font-size:19px;margin:0;max-width:420px}
   #levelscreen .phone{font-size:72px;line-height:1;animation:tilt 2.4s ease-in-out infinite}
@@ -267,6 +269,7 @@
   <button class="go" id="levelgo">⟲ LEVEL &amp; START</button>
   <button class="skip" id="levelskip">Start without lean angle</button>
 </div>
+<div id="verchip" class="hidden"></div>
 <div id="toast"></div>
 
 <script>
@@ -292,6 +295,9 @@ const S = {
   battery: { level: null, warned: false },
 };
 const CAP = window.CapNative || null;
+const WEB_BUILD = '1.2 (7)';   // shown when not running inside the native app
+S.appVersion = WEB_BUILD;
+(async () => { try { if (CAP && CAP.App) { const i = await CAP.App.getInfo(); S.appVersion = `${i.version} (${i.build})`; } } catch (e) { } const v = document.getElementById('verchip'); if (v) { v.textContent = 'SkyRoute ' + S.appVersion; v.classList.remove('hidden'); setTimeout(() => v.classList.add('hidden'), 4000); } })();
 if (CAP) document.body.classList.add('native');
 const store = { get(k, d) { try { const v = localStorage.getItem('skyroute.' + k); return v == null ? d : JSON.parse(v); } catch (e) { return d; } }, set(k, v) { try { localStorage.setItem('skyroute.' + k, JSON.stringify(v)); } catch (e) { } } };
 S.mode = store.get('mode', 'balanced');
@@ -1068,6 +1074,7 @@ function openRides() {
   let html = `<div class="row" style="align-items:center;justify-content:space-between"><h2>My rides</h2><button class="fab" id="ridesclose">✕</button></div>
     <div class="totals"><div><b>${Math.round(tm).toLocaleString()}</b><span>miles</span></div><div><b>${th.toFixed(1)}</b><span>hours</span></div><div><b>${fmtFt(tg)}</b><span>ft climbed</span></div></div>`;
   if (!rides.length) html += '<div class="empty">No rides yet.<br>Finish a route and save it — it shows up here.</div>';
+  html += `<div class="verline">SkyRoute ${S.appVersion} · build ${(S.appVersion.match(/\((\d+)\)/) || [])[1] || '?'}</div>`;
   for (const r of rides) {
     const d = new Date(r.date).toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
     const lean = r.maxLeanL != null ? ` · lean ${Math.max(r.maxLeanL, r.maxLeanR)}°` : '';
