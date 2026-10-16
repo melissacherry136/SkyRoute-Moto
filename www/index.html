@@ -50,6 +50,8 @@
   .favrow .favdel{flex:0 0 60px;width:60px;text-align:center;font-size:28px;color:var(--muted)}
   #bar #favbtn{flex:0 0 56px;width:56px;padding:0;font-size:30px;line-height:1;color:var(--muted);background:var(--panel2)} #bar #favbtn.on{color:#fbbf24} body.nav #favbtn{display:none}
   #favpick{display:flex;gap:10px;margin-top:10px} #favpick .btn{height:60px;font-size:18px} #favpick{margin:0 0 8px}
+  #status{position:fixed;left:12px;right:12px;bottom:calc(var(--sab) + 16px);z-index:12;background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:16px;backdrop-filter:blur(12px);max-width:536px;margin:0 auto}
+  #status .t{font-size:20px;font-weight:800} #status .d{color:var(--muted);font-size:15px;margin-top:4px} #status .a{display:flex;gap:10px;margin-top:12px} #status .a .btn{height:56px;font-size:18px}
   #levelscreen{position:fixed;inset:0;z-index:30;background:var(--bg);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px;padding:calc(var(--sat) + 24px) 24px calc(var(--sab) + 24px);text-align:center}
   #levelscreen h2{font-size:28px;margin:0} #levelscreen p{color:var(--muted);font-size:19px;margin:0;max-width:420px}
   #levelscreen .phone{font-size:72px;line-height:1;animation:tilt 2.4s ease-in-out infinite}
@@ -256,6 +258,7 @@
 <div id="wxpanel" class="overlay hidden"><div class="card" id="wxcard"></div></div>
 <div id="summary" class="overlay hidden"><div class="card" id="summarycard"></div></div>
 <div id="ridespanel" class="hidden"></div>
+<div id="status" class="hidden"><div class="t"></div><div class="d"></div><div class="a"></div></div>
 <div id="levelscreen" class="hidden">
   <div class="phone">📱</div>
   <h2>Level your phone</h2>
@@ -562,6 +565,10 @@ async function searchCensus(q, signal) {   // US Census geocoder: street-address
   return (j.result?.addressMatches || []).slice(0, 3).map(m => { const a = m.addressComponents || {}; const name = [a.fromAddress ? m.matchedAddress.split(',')[0] : null].filter(Boolean)[0] || m.matchedAddress.split(',')[0]; const title = name.toLowerCase().replace(/\b\w/g, c => c.toUpperCase()); const sub = [a.city ? a.city.toLowerCase().replace(/\b\w/g, c => c.toUpperCase()) : null, a.state, a.zip].filter(Boolean).join(', '); return { name: title, sub, lngLat: [m.coordinates.x, m.coordinates.y], rank: 0 }; });
 }
 
+/* ---------- status card (problems the rider needs to see, with a way out) ---------- */
+function showStatus(title, desc, actions) { const el = $('#status'); el.querySelector('.t').textContent = title; el.querySelector('.d').innerHTML = desc || ''; const a = el.querySelector('.a'); a.innerHTML = ''; (actions || []).forEach(([label, fn]) => { const b = document.createElement('button'); b.className = 'btn' + (a.children.length ? '' : ' primary'); b.textContent = label; b.onclick = () => { hideStatus(); fn(); }; a.appendChild(b); }); const x = document.createElement('button'); x.className = 'btn ghost'; x.textContent = '✕'; x.onclick = hideStatus; a.appendChild(x); el.classList.remove('hidden'); }
+function hideStatus() { $('#status').classList.add('hidden'); }
+
 /* ---------- favorites ---------- */
 function favs() { return store.get('favs', []); }
 function favKey(d) { return d.lngLat[0].toFixed(4) + ',' + d.lngLat[1].toFixed(4); }
@@ -625,21 +632,22 @@ async function routeOSRM(from, to) {
 function setDestination(lngLat, name, sub) {
   S.dest = { lngLat, name, sub }; renderFavBtn();
   if (destMarker) destMarker.remove(); destMarker = new maplibregl.Marker({ color: '#ef4444' }).setLngLat(lngLat).addTo(map);
-  if (!S.pos) { toast('Waiting for your location…'); map.flyTo({ center: lngLat, zoom: 13 }); return; }
+  if (!S.pos) { map.flyTo({ center: lngLat, zoom: 13 }); showStatus('📍 Waiting for your location…', 'Make sure Location is allowed for SkyRoute in Settings. Or tap <b>Use map center</b> to start from where the map is.', [['Use map center', () => { const c = map.getCenter(); setPosition(c.lng, c.lat, 0, 0, null, true); }], ['Retry GPS', () => startGeolocation()]]); return; }
   buildRoute(false);
 }
 async function buildRoute(isReroute) {
   if (!S.pos || !S.dest) return; await mapReady;
-  const reqId = ++buildRoute.seq;
+  const reqId = ++buildRoute.seq; if (!isReroute) toast('Finding routes…', 8000);
   try {
     if (isReroute) { let rt; try { rt = await routeValhalla(S.pos, S.dest.lngLat, S.mode); } catch (e) { rt = await routeOSRM(S.pos, S.dest.lngLat); } if (reqId !== buildRoute.seq) return; applyRoute(rt, true); return; }
-    const results = await Promise.allSettled(MODES.map(m => routeValhalla(S.pos, S.dest.lngLat, m)));
+    let results = await Promise.allSettled(MODES.map(m => routeValhalla(S.pos, S.dest.lngLat, m)));
     if (reqId !== buildRoute.seq) return;
+    if (results.every(r => r.status === 'rejected')) { await new Promise(r => setTimeout(r, 1500)); results = await Promise.allSettled(MODES.map(m => routeValhalla(S.pos, S.dest.lngLat, m))); if (reqId !== buildRoute.seq) return; }
     S.routes = {}; results.forEach((r, i) => { if (r.status === 'fulfilled') S.routes[MODES[i]] = r.value; });
     if (!Object.keys(S.routes).length) { const rt = await routeOSRM(S.pos, S.dest.lngLat); if (reqId !== buildRoute.seq) return; S.routes = { fast: rt }; toast('Scenic routing unavailable right now — showing direct', 3000); }
     if (!S.routes[S.mode]) S.mode = S.routes.balanced ? 'balanced' : Object.keys(S.routes)[0];
     applyRoute(S.routes[S.mode], false);
-  } catch (e) { console.warn(e); const cached = store.get('lastRoute'); if (cached && cached.coords) { toast('Offline \u2014 showing last saved route', 3000); applyRoute({ coords: cached.coords, steps: cached.steps, duration: cached.duration, engine: 'cached', mode: cached.mode }, false); } else toast('Could not find a route'); }
+  } catch (e) { console.warn(e); const cached = store.get('lastRoute'); if (cached && cached.coords) { toast('Offline \u2014 showing last saved route', 3000); applyRoute({ coords: cached.coords, steps: cached.steps, duration: cached.duration, engine: 'cached', mode: cached.mode }, false); } else showStatus('⚠️ Could not get a route', 'The routing server did not answer. Check your signal, then try again.', [['Try again', () => buildRoute(false)]]); }
 }
 buildRoute.seq = 0;
 function applyRoute(rt, isReroute) {
@@ -650,6 +658,7 @@ function applyRoute(rt, isReroute) {
   for (let i = 1; i < coords.length; i++) if (cumT[i] == null) cumT[i] = cumT[i - 1];
   S.route = { coords, cum, cumT, steps, distance: cum[cum.length - 1], duration: rt.duration, progress: 0, remainingDist: cum[cum.length - 1], remainingTime: rt.duration, engine: rt.engine, mode: rt.mode };
   try { store.set('lastRoute', { coords, steps, distance: S.route.distance, duration: rt.duration, dest: S.dest, mode: rt.mode, ts: Date.now() }); } catch (e) {}
+  hideStatus();
   map.getSource('route').setData({ type: 'Feature', geometry: { type: 'LineString', coordinates: coords } });
   const col = { scenic: ['#f97316', '#7c2d12'], balanced: ['#22c55e', '#14532d'], fast: ['#3b8bff', '#0c3c8c'] }[rt.mode] || ['#3b8bff', '#0c3c8c'];
   map.setPaintProperty('route-line', 'line-color', col[0]); map.setPaintProperty('route-casing', 'line-color', col[1]);
@@ -835,7 +844,7 @@ function setPosition(lng, lat, heading, speed, alt, manual) {
 }
 function startGeolocation() {
   const onFix = c => { if (DEMO && S.navigating) return; setPosition(c.longitude, c.latitude, c.heading, c.speed, c.altitude, false); };
-  if (CAP && CAP.Geolocation) { let capWatch = null; const startCap = () => { capWatch = CAP.Geolocation.watchPosition({ enableHighAccuracy: true, timeout: 15000, maximumAge: 1000 }, (p, err) => { if (err) { console.warn(err); if (capWatch != null) { try { CAP.Geolocation.clearWatch({ id: capWatch }); } catch (e) {} capWatch = null; setTimeout(startCap, 3000); } return; } onFix(p.coords); }); }; startCap(); return; }
+  if (CAP && CAP.Geolocation) { let capWatch = null, restarting = false; const startCap = async () => { restarting = false; try { capWatch = await CAP.Geolocation.watchPosition({ enableHighAccuracy: true, timeout: 20000, maximumAge: 1000 }, (p, err) => { if (err) { console.warn('gps', err); if (!restarting) { restarting = true; const id = capWatch; capWatch = null; if (id) CAP.Geolocation.clearWatch({ id }).catch(() => {}); setTimeout(startCap, 3000); } return; } onFix(p.coords); }); } catch (e) { console.warn('gps start', e); if (!restarting) { restarting = true; setTimeout(startCap, 5000); } } }; startCap(); return; }
   if (!navigator.geolocation) { toast('No GPS available — tap the map to set your start'); return; }
   navigator.geolocation.watchPosition(p => onFix(p.coords), err => toast(err.code === 1 ? 'Location permission denied — tap the map to set your start' : 'Waiting for GPS…', 4000), { enableHighAccuracy: true, maximumAge: 1000, timeout: 15000 });
 }
@@ -857,7 +866,7 @@ $('#instheading').onclick = () => toast(`Heading ${compass(S.heading)} · ${Math
 /* ---------- motion: lean angle + g-force ---------- */
 async function enableMotion() {
   const m = S.motion; if (m.ok) return true;
-  try { if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') { const r = await DeviceMotionEvent.requestPermission(); if (r !== 'granted') return false; } } catch (e) { return false; }
+  try { if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') { const r = await Promise.race([DeviceMotionEvent.requestPermission(), new Promise(res => setTimeout(() => res('timeout'), 4000))]); if (r !== 'granted') return false; } } catch (e) { return false; }
   if (typeof DeviceMotionEvent === 'undefined') return false;
   window.addEventListener('devicemotion', onMotion); m.ok = true; return true;
 }
@@ -981,7 +990,7 @@ function endNavigation(clearRoute) {
   $('#planactions').classList.remove('hidden'); $('.modes').classList.remove('hidden'); $('#live').classList.add('hidden');
   renderAlert(); speechSynthesis?.cancel();
   if (wasNav) finishRide();
-  if (clearRoute) { S.route = null; S.routes = null; S.dest = null; if (destMarker) destMarker.remove(); destMarker = null; map.getSource('route')?.setData(EMPTY); map.getSource('rwx')?.setData(EMPTY); clearPoiMarkers(); $('#poirow').classList.add('hidden'); $('#poipop').classList.add('hidden'); setSheet(false, false); $('#q').value = ''; $('#qclear').classList.add('hidden'); $('#favpick').classList.add('hidden'); }
+  if (clearRoute) { S.route = null; S.routes = null; S.dest = null; if (destMarker) destMarker.remove(); destMarker = null; map.getSource('route')?.setData(EMPTY); map.getSource('rwx')?.setData(EMPTY); clearPoiMarkers(); $('#poirow').classList.add('hidden'); $('#poipop').classList.add('hidden'); hideStatus(); setSheet(false, false); $('#q').value = ''; $('#qclear').classList.add('hidden'); $('#favpick').classList.add('hidden'); }
   else setSheet(true, false);
   if (S.pos) map.easeTo({ center: S.pos, zoom: 14, pitch: 0, bearing: 0, padding: { top: 0, bottom: 0 } });
 }
