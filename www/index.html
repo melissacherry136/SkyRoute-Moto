@@ -870,17 +870,19 @@ function startGeolocation(force) {
     S.gps.webWatch = navigator.geolocation.watchPosition(p => onFix(p.coords, 'webkit'), err => { S.gps.err = (err.code === 1 ? 'permission denied' : errText(err)); if (!CAP) toast(err.code === 1 ? 'Location permission denied — tap the map to set your start' : 'Waiting for GPS…', 4000); }, { enableHighAccuracy: true, maximumAge: 1000, timeout: 15000 });
   };
   if (CAP && CAP.Geolocation) {
-    let capWatch = null, restarting = false;
+    let capWatch = null, lastErr = 0;
     const startCap = async () => {
-      restarting = false;
       try { try { await CAP.Geolocation.requestPermissions(); } catch (e) { }
-        capWatch = await CAP.Geolocation.watchPosition({ enableHighAccuracy: true, timeout: 20000, maximumAge: 1000 }, (p, err) => {
-          if (err) { console.warn('gps', err); S.gps.err = errText(err); if (!restarting) { restarting = true; const id = capWatch; capWatch = null; if (id) CAP.Geolocation.clearWatch({ id }).catch(() => {}); setTimeout(startCap, 3000); } return; }
+        if (capWatch) { const id = capWatch; capWatch = null; CAP.Geolocation.clearWatch({ id }).catch(() => {}); }
+        capWatch = await CAP.Geolocation.watchPosition({ enableHighAccuracy: true, maximumAge: 1000 }, (p, err) => {
+          if (err) { console.warn('gps', err); S.gps.err = errText(err); lastErr = Date.now(); return; }   // early "location unknown" errors are normal — keep listening
           onFix(p.coords, 'native');
         });
-      } catch (e) { console.warn('gps start', e); S.gps.err = errText(e); if (!restarting) { restarting = true; setTimeout(startCap, 5000); } }
+      } catch (e) { console.warn('gps start', e); S.gps.err = errText(e); }
     };
     startCap();
+    // watchdog: only if the feed has been silent (no fix) for 30 s after an error do we restart it
+    clearInterval(S.gps.watchdog); S.gps.watchdog = setInterval(() => { const silent = Date.now() - Math.max(S.gps.last, S.gps.started); if (lastErr && silent > 30000 && Date.now() - lastErr < 60000) { lastErr = 0; S.gps.started = Date.now(); startCap(); } }, 5000);
     setTimeout(() => { if (!S.gps.fixes) startWeb(); }, 8000);   // belt and braces: WebKit's own GPS as a second source
     return;
   }
