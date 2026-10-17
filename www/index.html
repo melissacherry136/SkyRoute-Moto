@@ -295,6 +295,7 @@ const S = {
   battery: { level: null, warned: false },
 };
 const CAP = window.CapNative || null;
+S.gps = { started: 0, fixes: 0, last: 0, acc: null, err: null, source: null };
 const WEB_BUILD = '1.2 (7)';   // shown when not running inside the native app
 S.appVersion = WEB_BUILD;
 (async () => { try { if (CAP && CAP.App) { const i = await CAP.App.getInfo(); S.appVersion = `${i.version} (${i.build})`; } } catch (e) { } const v = document.getElementById('verchip'); if (v) { v.textContent = 'SkyRoute ' + S.appVersion; v.classList.remove('hidden'); setTimeout(() => v.classList.add('hidden'), 4000); } })();
@@ -571,6 +572,16 @@ async function searchCensus(q, signal) {   // US Census geocoder: street-address
   return (j.result?.addressMatches || []).slice(0, 3).map(m => { const a = m.addressComponents || {}; const name = [a.fromAddress ? m.matchedAddress.split(',')[0] : null].filter(Boolean)[0] || m.matchedAddress.split(',')[0]; const title = name.toLowerCase().replace(/\b\w/g, c => c.toUpperCase()); const sub = [a.city ? a.city.toLowerCase().replace(/\b\w/g, c => c.toUpperCase()) : null, a.state, a.zip].filter(Boolean).join(', '); return { name: title, sub, lngLat: [m.coordinates.x, m.coordinates.y], rank: 0 }; });
 }
 
+/* ---------- waiting for GPS: live status + honest ways out ---------- */
+function gpsReport() { const g = S.gps; const secs = g.started ? Math.round((Date.now() - g.started) / 1000) : 0; if (g.fixes) return `GPS OK · last fix ${Math.round((Date.now() - g.last) / 1000)} s ago · ±${Math.round(g.acc || 0)} m`; return `No fix after ${secs} s` + (g.err ? ` · ${g.err}` : '') + (g.source ? ` · via ${g.source}` : ''); }
+function showGpsWait() {
+  const last = store.get('lastPos'); const actions = [];
+  if (last) actions.push(['Start from last known spot', () => { setPosition(last[0], last[1], 0, 0, null, true); toast('Starting from your last known position — GPS will take over when it locks', 4000); }]);
+  actions.push(['Retry GPS', () => { S.gps.err = null; startGeolocation(true); }]);
+  showStatus('📍 Waiting for your location…', '<span id="gpsline"></span><br>Check iPhone Settings → SkyRoute → Location is <b>While Using</b> or <b>Always</b>. Or tap the map where you are to set your start.', actions);
+  clearInterval(S.gpsWaitTimer); S.gpsWaitTimer = setInterval(() => { const el = document.getElementById('gpsline'); if (!el || $('#status').classList.contains('hidden')) { clearInterval(S.gpsWaitTimer); return; } el.textContent = gpsReport(); }, 1000);
+}
+
 /* ---------- status card (problems the rider needs to see, with a way out) ---------- */
 function showStatus(title, desc, actions) { const el = $('#status'); el.querySelector('.t').textContent = title; el.querySelector('.d').innerHTML = desc || ''; const a = el.querySelector('.a'); a.innerHTML = ''; (actions || []).forEach(([label, fn]) => { const b = document.createElement('button'); b.className = 'btn' + (a.children.length ? '' : ' primary'); b.textContent = label; b.onclick = () => { hideStatus(); fn(); }; a.appendChild(b); }); const x = document.createElement('button'); x.className = 'btn ghost'; x.textContent = '✕'; x.onclick = hideStatus; a.appendChild(x); el.classList.remove('hidden'); }
 function hideStatus() { $('#status').classList.add('hidden'); }
@@ -638,7 +649,7 @@ async function routeOSRM(from, to) {
 function setDestination(lngLat, name, sub) {
   S.dest = { lngLat, name, sub }; renderFavBtn();
   if (destMarker) destMarker.remove(); destMarker = new maplibregl.Marker({ color: '#ef4444' }).setLngLat(lngLat).addTo(map);
-  if (!S.pos) { map.flyTo({ center: lngLat, zoom: 13 }); showStatus('📍 Waiting for your location…', 'Make sure Location is allowed for SkyRoute in Settings. Or tap <b>Use map center</b> to start from where the map is.', [['Use map center', () => { const c = map.getCenter(); setPosition(c.lng, c.lat, 0, 0, null, true); }], ['Retry GPS', () => startGeolocation()]]); return; }
+  if (!S.pos) { showGpsWait(); return; }
   buildRoute(false);
 }
 async function buildRoute(isReroute) {
@@ -842,17 +853,38 @@ function setPosition(lng, lat, heading, speed, alt, manual) {
   const prev = S.pos; S.pos = [lng, lat]; S.speed = speed || 0; if (alt != null && !isNaN(alt)) S.alt = alt;
   if (!prev || haversine(prev, S.pos) > 500) store.set('lastPos', [+lng.toFixed(4), +lat.toFixed(4)]);
   if (heading != null && !isNaN(heading) && (speed > 1 || manual)) S.heading = heading; else if (prev && haversine(prev, S.pos) > 5) S.heading = bearing(prev, S.pos);
-  if (!S.hasFix) { S.hasFix = true; meMarker.setLngLat(S.pos).addTo(map); if (!S.route) map.jumpTo({ center: S.pos, zoom: 14 }); if (S.dest && !S.route) buildRoute(false); }
+  if (!manual) { S.gps.fixes++; S.gps.last = Date.now(); }
+  if (!S.hasFix) { S.hasFix = true; if (!manual) hideStatus(); meMarker.setLngLat(S.pos).addTo(map); if (!S.route) map.jumpTo({ center: S.pos, zoom: 14 }); if (S.dest && !S.route) buildRoute(false); }
   meMarker.setLngLat(S.pos).setRotation(S.heading);
   renderHeading(); fetchCurrentWeather(false);
   if (S.ride) recordSample();
   if (S.navigating) navTick(); else if (S.follow) map.easeTo({ center: S.pos, duration: 500 });
 }
-function startGeolocation() {
-  const onFix = c => { if (DEMO && S.navigating) return; setPosition(c.longitude, c.latitude, c.heading, c.speed, c.altitude, false); };
-  if (CAP && CAP.Geolocation) { let capWatch = null, restarting = false; const startCap = async () => { restarting = false; try { capWatch = await CAP.Geolocation.watchPosition({ enableHighAccuracy: true, timeout: 20000, maximumAge: 1000 }, (p, err) => { if (err) { console.warn('gps', err); if (!restarting) { restarting = true; const id = capWatch; capWatch = null; if (id) CAP.Geolocation.clearWatch({ id }).catch(() => {}); setTimeout(startCap, 3000); } return; } onFix(p.coords); }); } catch (e) { console.warn('gps start', e); if (!restarting) { restarting = true; setTimeout(startCap, 5000); } } }; startCap(); return; }
-  if (!navigator.geolocation) { toast('No GPS available — tap the map to set your start'); return; }
-  navigator.geolocation.watchPosition(p => onFix(p.coords), err => toast(err.code === 1 ? 'Location permission denied — tap the map to set your start' : 'Waiting for GPS…', 4000), { enableHighAccuracy: true, maximumAge: 1000, timeout: 15000 });
+function startGeolocation(force) {
+  if (S.gps.started && !force) return; S.gps.started = Date.now();
+  const onFix = (c, src) => { if (DEMO && S.navigating) return; if (c.accuracy != null) S.gps.acc = c.accuracy; S.gps.source = src; S.gps.err = null; setPosition(c.longitude, c.latitude, c.heading, c.speed, c.altitude, false); };
+  const errText = e => (e && (e.message || e.code)) ? String(e.message || ('code ' + e.code)).slice(0, 60) : 'unknown error';
+  const startWeb = () => {
+    if (!navigator.geolocation) { S.gps.err = 'no geolocation in this browser'; return; }
+    if (S.gps.webWatch != null) navigator.geolocation.clearWatch(S.gps.webWatch);
+    S.gps.webWatch = navigator.geolocation.watchPosition(p => onFix(p.coords, 'webkit'), err => { S.gps.err = (err.code === 1 ? 'permission denied' : errText(err)); if (!CAP) toast(err.code === 1 ? 'Location permission denied — tap the map to set your start' : 'Waiting for GPS…', 4000); }, { enableHighAccuracy: true, maximumAge: 1000, timeout: 15000 });
+  };
+  if (CAP && CAP.Geolocation) {
+    let capWatch = null, restarting = false;
+    const startCap = async () => {
+      restarting = false;
+      try { try { await CAP.Geolocation.requestPermissions(); } catch (e) { }
+        capWatch = await CAP.Geolocation.watchPosition({ enableHighAccuracy: true, timeout: 20000, maximumAge: 1000 }, (p, err) => {
+          if (err) { console.warn('gps', err); S.gps.err = errText(err); if (!restarting) { restarting = true; const id = capWatch; capWatch = null; if (id) CAP.Geolocation.clearWatch({ id }).catch(() => {}); setTimeout(startCap, 3000); } return; }
+          onFix(p.coords, 'native');
+        });
+      } catch (e) { console.warn('gps start', e); S.gps.err = errText(e); if (!restarting) { restarting = true; setTimeout(startCap, 5000); } }
+    };
+    startCap();
+    setTimeout(() => { if (!S.gps.fixes) startWeb(); }, 8000);   // belt and braces: WebKit's own GPS as a second source
+    return;
+  }
+  startWeb();
 }
 $('#recenter').onclick = () => { S.follow = true; $('#recenter').classList.add('hidden'); if (S.pos) { if (S.navigating) navCamera(true); else map.easeTo({ center: S.pos, zoom: 15, bearing: 0, pitch: 0 }); } };
 
@@ -969,6 +1001,7 @@ function showSummary(ride, samples) {
 /* ---------- navigation ---------- */
 async function startNavigation() {
   if (!S.route || !S.pos) return;
+  if (haversine(S.pos, S.dest.lngLat) < 60 && S.route.distance < 120) { showStatus('🏁 You\'re already at the destination', 'Your start point is on top of the address. ' + gpsReport() + '. Wait for a GPS fix, or tap the map where you actually are.', [['Retry GPS', () => { S.gps.err = null; startGeolocation(true); }]]); return; }
   S.navigating = true; S.follow = true; $('#recenter').classList.add('hidden');
   document.body.classList.add('nav');
   $('#toprow').classList.add('hidden'); $('#alert').classList.add('hidden'); $('#banner').classList.remove('hidden'); $('#inst').classList.remove('hidden');
